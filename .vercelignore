@@ -1,0 +1,4 @@
+# Keep the Vercel deployment lean — these aren't needed at runtime.
+docs
+engine-b
+tests
