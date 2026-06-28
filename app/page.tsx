@@ -5,6 +5,9 @@ import { SpeedHUD, TelemetryMetrics } from "../components/SpeedHUD";
 import { PrivacyManager } from "../components/PrivacyManager";
 import { SwarmVisualizer, SwarmState, SwarmNode } from "../components/SwarmVisualizer";
 import { Console } from "../components/Console";
+import ArtifactExporter from "../components/ArtifactExporter";
+import WorkspaceManager from "../components/WorkspaceManager";
+import PluginAddonManager from "../components/PluginAddonManager";
 
 export default function Dashboard() {
   // Key & settings state
@@ -307,6 +310,12 @@ export default function Dashboard() {
           />
         </div>
 
+        {/* Agentic Workspace Extensions */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+          <WorkspaceManager />
+          <PluginAddonManager />
+        </div>
+
         {/* Input prompt form */}
         <form onSubmit={handleRunSwarm} className="glass p-4 rounded-xl">
           <div className="flex flex-col gap-3">
@@ -370,6 +379,15 @@ export default function Dashboard() {
             <div className="prose prose-invert max-w-none text-sm text-zinc-300 leading-relaxed font-mono whitespace-pre-wrap max-h-80 overflow-y-auto bg-black/25 p-4 rounded-lg border border-zinc-900">
               {responseText}
             </div>
+            <ArtifactExporter 
+              content={responseText} 
+              files={Object.fromEntries(
+                Object.entries({
+                  "generated.html": generatedHtml,
+                  "generated.py": generatedPython
+                }).filter(([_, v]) => v != null)
+              ) as Record<string, string>} 
+            />
           </div>
         )}
       </main>

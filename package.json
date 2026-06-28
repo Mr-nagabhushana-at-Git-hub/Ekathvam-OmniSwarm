@@ -10,7 +10,12 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@isomorphic-git/lightning-fs": "^4.6.2",
+    "isomorphic-git": "^1.38.5",
+    "jszip": "^3.10.1",
     "next": "^16.2.9",
+    "pdf-lib": "^1.17.1",
+    "pptxgenjs": "^4.0.1",
     "react": "19.0.0",
     "react-dom": "19.0.0"
   },
