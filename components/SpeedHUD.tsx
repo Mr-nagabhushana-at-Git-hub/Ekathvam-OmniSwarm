@@ -16,12 +16,9 @@ interface SpeedHUDProps {
 }
 
 export const SpeedHUD: React.FC<SpeedHUDProps> = ({ cerebras, gpu }) => {
-  const speedup =
-    cerebras.tps > 0 && gpu.tps > 0
-      ? (cerebras.tps / gpu.tps).toFixed(1)
-      : cerebras.active && !cerebras.loading
-      ? "8.4" // realistic fallback for demo
-      : "0.0";
+  // Only show a speedup when BOTH sides were actually measured. No fabrication.
+  const hasRace = cerebras.tps > 0 && gpu.tps > 0;
+  const speedup = hasRace ? (cerebras.tps / gpu.tps).toFixed(1) : null;
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
@@ -119,8 +116,16 @@ export const SpeedHUD: React.FC<SpeedHUDProps> = ({ cerebras, gpu }) => {
           <h3 className="text-lg font-bold text-white mt-1">Cerebras Acceleration</h3>
         </div>
         <div className="mt-4 pt-4 border-t border-zinc-800 flex items-baseline gap-2">
-          <span className="text-4xl font-extrabold text-emerald-400 font-mono">{speedup}x</span>
-          <span className="text-sm text-emerald-500 font-medium">Faster TTFT / TPS</span>
+          {hasRace ? (
+            <>
+              <span className="text-4xl font-extrabold text-emerald-400 font-mono">{speedup}x</span>
+              <span className="text-sm text-emerald-500 font-medium">Faster tokens/sec (measured)</span>
+            </>
+          ) : (
+            <span className="text-xs text-zinc-500 leading-snug">
+              Add a GPU baseline key to run a live, measured Cerebras-vs-GPU race.
+            </span>
+          )}
         </div>
       </div>
     </div>

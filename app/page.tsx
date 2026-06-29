@@ -17,6 +17,10 @@ export default function Dashboard() {
   const [encryptPayload, setEncryptPayload] = useState(false);
   const [useTools, setUseTools] = useState(true);
 
+  // Optional GPU baseline for a real, measured Cerebras-vs-GPU speed race.
+  const [baselineKey, setBaselineKey] = useState("");
+  const [baselineProvider, setBaselineProvider] = useState("OpenAI");
+
   // User input
   const [prompt, setPrompt] = useState("");
   const [loading, setLoading] = useState(false);
@@ -104,9 +108,10 @@ export default function Dashboard() {
     addLog("Initializing Twin-Engine Orchestration Core...");
     addLog(`Target Provider: ${provider} | Model: ${model}`);
 
-    // Set Cerebras HUD active
+    // Set Cerebras HUD active. The GPU card only goes "active" when a real
+    // baseline key is supplied — we never show a fabricated comparison.
     setCerebrasMetrics({ ttft: 0, tps: 0, totalTokens: 0, active: true, loading: true });
-    setGpuMetrics({ ttft: 0, tps: 0, totalTokens: 0, active: true, loading: true });
+    setGpuMetrics({ ttft: 0, tps: 0, totalTokens: 0, active: !!baselineKey, loading: !!baselineKey });
 
     try {
       const response = await fetch("/api/swarm", {
@@ -118,6 +123,8 @@ export default function Dashboard() {
           provider,
           model,
           useTools,
+          baselineApiKey: baselineKey || undefined,
+          baselineProvider: baselineKey ? baselineProvider : undefined,
         }),
       });
 
@@ -153,6 +160,29 @@ export default function Dashboard() {
 
             if (event.type === "telemetry") {
               setSwarmState((prev) => ({ ...prev, stage: event.stage }));
+              addLog(event.logs);
+            }
+
+            if (event.type === "metrics") {
+              // Real, measured throughput from the actual token stream.
+              setCerebrasMetrics({
+                ttft: event.cerebras.ttft,
+                tps: event.cerebras.tps,
+                totalTokens: event.cerebras.totalTokens,
+                active: true,
+                loading: false,
+              });
+              if (event.gpu) {
+                setGpuMetrics({
+                  ttft: event.gpu.ttft,
+                  tps: event.gpu.tps,
+                  totalTokens: event.gpu.totalTokens,
+                  active: true,
+                  loading: false,
+                });
+              } else {
+                setGpuMetrics({ ttft: 0, tps: 0, totalTokens: 0, active: false, loading: false });
+              }
               addLog(event.logs);
             }
 
@@ -208,23 +238,8 @@ export default function Dashboard() {
                 setGeneratedPython(pyMatch[1]);
                 addLog("Extracted generated Python script for Sandbox VM.");
               }
-
-              // Update SpeedHUD with actual metrics averages from nodes
-              const completedNodes = nodeResultsForAverage(event.logs); // Or average from our state
-              setCerebrasMetrics({
-                ttft: 180,
-                tps: 345,
-                totalTokens: 520,
-                active: true,
-                loading: false,
-              });
-              setGpuMetrics({
-                ttft: 1476,
-                tps: 41,
-                totalTokens: 520,
-                active: true,
-                loading: false,
-              });
+              // Speed metrics were already set live by the "metrics" event
+              // (measured from the real stream) — nothing to hard-code here.
             }
           } catch (jsonErr) {
             console.error("Failed to parse SSE JSON line", jsonErr);
@@ -237,10 +252,6 @@ export default function Dashboard() {
     } finally {
       setLoading(false);
     }
-  };
-
-  const nodeResultsForAverage = (logs: string[]) => {
-    // Helper helper
   };
 
   const handleRunPythonProxy = async (code: string): Promise<string> => {
@@ -358,6 +369,31 @@ export default function Dashboard() {
                   "Dispatch Swarm"
                 )}
               </button>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500 border-t border-zinc-850 pt-3">
+              <span className="font-semibold uppercase tracking-wider text-zinc-400">Speed race vs GPU (optional):</span>
+              <select
+                value={baselineProvider}
+                onChange={(e) => setBaselineProvider(e.target.value)}
+                disabled={loading}
+                className="bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-zinc-300 focus:outline-none focus:border-indigo-500"
+              >
+                <option>OpenAI</option>
+                <option>Groq</option>
+                <option>Gemini</option>
+                <option>Anthropic</option>
+              </select>
+              <input
+                type="password"
+                value={baselineKey}
+                onChange={(e) => setBaselineKey(e.target.value)}
+                disabled={loading}
+                placeholder="Baseline key — measured live; leave blank to skip the race"
+                className="flex-1 min-w-[240px] bg-zinc-900 border border-zinc-800 rounded px-3 py-1 text-zinc-300 focus:outline-none focus:border-indigo-500"
+                autoComplete="off"
+                spellCheck={false}
+              />
             </div>
           </div>
         </form>

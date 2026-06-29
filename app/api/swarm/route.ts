@@ -9,6 +9,16 @@ interface SwarmRequest {
   provider: string;
   model: string;
   useTools: boolean;
+  // Optional GPU baseline for a real, measured side-by-side speed race.
+  baselineApiKey?: string;
+  baselineProvider?: string;
+  baselineModel?: string;
+}
+
+export interface LiveMetrics {
+  ttft: number; // ms, time to first streamed token (measured)
+  tps: number; // output tokens/sec over the generation window (measured)
+  totalTokens: number; // completion tokens (from usage, else estimated)
 }
 
 // Resilient LLM router supporting Cerebras, OpenAI, Groq, Gemini, and Anthropic
@@ -104,6 +114,140 @@ async function callLLM(
   }
 }
 
+// Read a text/event-stream body line-by-line, invoking onData with each `data:` payload.
+async function readSSE(body: ReadableStream<Uint8Array>, onData: (data: string) => void): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, nl).trim();
+        buffer = buffer.slice(nl + 1);
+        if (line.startsWith("data:")) onData(line.slice(5).trim());
+      }
+    }
+    const tail = buffer.trim();
+    if (tail.startsWith("data:")) onData(tail.slice(5).trim());
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+interface MeasuredResult extends LiveMetrics {
+  text: string;
+}
+
+// Stream a completion and MEASURE real metrics: TTFT from the first token, and
+// tokens/sec over the actual generation window. Never hard-coded. Covers the
+// OpenAI-compatible providers (Cerebras, Groq, OpenAI, Gemini) and Anthropic.
+async function streamMeasured(
+  provider: string,
+  apiKey: string,
+  model: string,
+  systemPrompt: string,
+  userPrompt: string,
+  temperature = 0.3,
+): Promise<MeasuredResult> {
+  const cp = provider.trim().toLowerCase();
+  let url = "";
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  let body: Record<string, unknown> = {};
+  const isAnthropic = cp === "anthropic";
+
+  if (cp === "cerebras") {
+    url = "https://api.cerebras.ai/v1/chat/completions";
+    headers["Authorization"] = `Bearer ${apiKey}`;
+    body = { model: model || "gemma-4-31b" };
+  } else if (cp === "groq") {
+    url = "https://api.groq.com/openai/v1/chat/completions";
+    headers["Authorization"] = `Bearer ${apiKey}`;
+    body = { model: model || "llama-3.1-70b-versatile" };
+  } else if (cp === "openai") {
+    url = "https://api.openai.com/v1/chat/completions";
+    headers["Authorization"] = `Bearer ${apiKey}`;
+    body = { model: model || "gpt-4o-mini" };
+  } else if (cp.includes("gemini")) {
+    url = `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions?key=${apiKey}`;
+    body = { model: model || "gemini-2.5-flash" };
+  } else if (isAnthropic) {
+    url = "https://api.anthropic.com/v1/messages";
+    headers["x-api-key"] = apiKey;
+    headers["anthropic-version"] = "2023-06-01";
+    body = {
+      model: model || "claude-3-5-sonnet-latest",
+      system: systemPrompt,
+      messages: [{ role: "user", content: userPrompt }],
+      max_tokens: 4096,
+      temperature,
+      stream: true,
+    };
+  } else {
+    throw new Error(`Unsupported provider: ${provider}`);
+  }
+
+  if (!isAnthropic) {
+    body.messages = [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ];
+    body.temperature = temperature;
+    body.stream = true;
+    body.stream_options = { include_usage: true };
+  }
+
+  const start = Date.now();
+  const response = await fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
+  if (!response.ok || !response.body) {
+    const errorText = await response.text().catch(() => response.statusText);
+    throw new Error(`API Error (${provider}): ${response.status} - ${errorText.slice(0, 300)}`);
+  }
+
+  let text = "";
+  let firstTokenAt = 0;
+  let completionTokens = 0;
+
+  await readSSE(response.body, (data) => {
+    if (data === "[DONE]") return;
+    let json: any;
+    try {
+      json = JSON.parse(data);
+    } catch {
+      return;
+    }
+    if (isAnthropic) {
+      if (json?.type === "content_block_delta" && json?.delta?.text) {
+        if (!firstTokenAt) firstTokenAt = Date.now();
+        text += json.delta.text;
+      }
+      if (json?.usage?.output_tokens) completionTokens = json.usage.output_tokens;
+    } else {
+      const delta: string | undefined = json?.choices?.[0]?.delta?.content;
+      if (delta) {
+        if (!firstTokenAt) firstTokenAt = Date.now();
+        text += delta;
+      }
+      if (json?.usage?.completion_tokens) completionTokens = json.usage.completion_tokens;
+    }
+  });
+
+  const end = Date.now();
+  if (!firstTokenAt) firstTokenAt = end;
+  if (!completionTokens) completionTokens = Math.max(1, Math.round(text.length / 4));
+  const genSeconds = Math.max(0.001, (end - firstTokenAt) / 1000);
+
+  return {
+    text,
+    ttft: firstTokenAt - start,
+    tps: Math.round((completionTokens / genSeconds) * 10) / 10,
+    totalTokens: completionTokens,
+  };
+}
+
 // Resilient HTML search parser for DDG grounding
 async function performWebSearch(query: string): Promise<string> {
   try {
@@ -146,7 +290,7 @@ export async function POST(req: NextRequest) {
 
       try {
         const body: SwarmRequest = await req.json();
-        const { prompt, apiKey, provider, model, useTools } = body;
+        const { prompt, apiKey, provider, model, useTools, baselineApiKey, baselineProvider, baselineModel } = body;
 
         if (!prompt || !apiKey) {
           send({ type: "error", error: "Missing required inputs: prompt and API key are mandatory." });
@@ -279,7 +423,30 @@ export async function POST(req: NextRequest) {
           "You are the Lead Synthesizer. Merge the parallel swarm insights into a single, cohesive, perfectly formatted markdown response. IMPORTANT: If a web application is requested, write a complete, standalone, gorgeous HTML block in ```html ... ```. If a Python script is requested, write a complete, runnable Python script in ```python ... ```. Include no explanatory filler text outside of the code blocks if the user is asking strictly for code.";
         const synthPrompt = `Original Prompt: ${prompt}\n\nGrounding Facts:\n${facts}\n\nSwarm Insights:\n${combinedInsights}`;
 
-        let masterDraft = await callLLM(provider, apiKey, model, synthSystem, synthPrompt);
+        // Fire an optional GPU baseline on the SAME prompt, concurrently, for a
+        // real apples-to-apples speed race. No baseline key => no baseline (we
+        // never fabricate the comparison).
+        const baselineEnabled = !!(baselineApiKey && baselineProvider);
+        const baselinePromise: Promise<MeasuredResult | null> = baselineEnabled
+          ? streamMeasured(baselineProvider!, baselineApiKey!, baselineModel || "", synthSystem, synthPrompt, 0.3).catch(() => null)
+          : Promise.resolve(null);
+
+        // The synthesis is the primary, user-facing generation — measure it live.
+        const synthMeasured = await streamMeasured(provider, apiKey, model, synthSystem, synthPrompt, 0.3);
+        let masterDraft = synthMeasured.text;
+
+        const baselineMeasured = await baselinePromise;
+        send({
+          type: "metrics",
+          stage: "synthesizing",
+          cerebras: { ttft: Math.round(synthMeasured.ttft), tps: synthMeasured.tps, totalTokens: synthMeasured.totalTokens },
+          gpu: baselineMeasured
+            ? { ttft: Math.round(baselineMeasured.ttft), tps: baselineMeasured.tps, totalTokens: baselineMeasured.totalTokens }
+            : null,
+          logs: baselineMeasured
+            ? `Measured: ${provider} ${synthMeasured.tps} tok/s vs baseline ${baselineProvider} ${baselineMeasured.tps} tok/s.`
+            : `Measured live: ${provider} ${synthMeasured.tps} tok/s (TTFT ${Math.round(synthMeasured.ttft)}ms).`,
+        });
 
         // 5. Critic & Refiner Loop Stage
         send({
