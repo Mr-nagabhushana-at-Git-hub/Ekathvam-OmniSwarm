@@ -2,6 +2,7 @@
 
 import React, { useState } from "react";
 import { SpeedHUD, TelemetryMetrics } from "../components/SpeedHUD";
+import { CerebrasAdvantage } from "../components/CerebrasAdvantage";
 import { PrivacyManager } from "../components/PrivacyManager";
 import { SwarmVisualizer, SwarmState, SwarmNode } from "../components/SwarmVisualizer";
 import { Console } from "../components/Console";
@@ -310,6 +311,10 @@ export default function Dashboard() {
         {/* SpeedHUD & Privacy manager */}
         <div>
           <SpeedHUD cerebras={cerebrasMetrics} gpu={gpuMetrics} />
+          <CerebrasAdvantage
+            cerebrasTps={cerebrasMetrics.tps}
+            measured={cerebrasMetrics.active && !cerebrasMetrics.loading && cerebrasMetrics.tps > 0}
+          />
           <PrivacyManager
             apiKey={apiKey}
             setApiKey={setApiKey}
